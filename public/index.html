@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>ARINC 429 completo</title>
+<style>
+  body { font-family: Arial, sans-serif; max-width: 1000px; margin: 20px auto; padding: 0 10px; }
+  h2 { border-bottom: 2px solid #1a4d8f; padding-bottom: 4px; }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0 25px; font-size: 14px; }
+  th, td { border: 1px solid #ccc; padding: 5px; text-align: left; }
+  th { background: #1a4d8f; color: #fff; }
+  input, select { padding: 5px; margin: 2px; } button { padding: 5px 9px; cursor: pointer; }
+  .bin { font-family: monospace; letter-spacing: 1px; }
+  .bin .par { color: #b00; } .bin .ssm { color: #a0a; } .bin .dat { color: #070; } .bin .sdi { color: #c60; } .bin .lab { color: #00b; }
+  .ok { color: #070; } .mal { color: #b00; } #msg { color: #b00; font-weight: bold; }
+  canvas { border: 1px solid #ccc; width: 100%; height: 120px; }
+</style>
+</head>
+<body>
+<h1>Sistema ARINC 429</h1>
+<p id="msg"></p>
+
+<h2>Instrumentos aeronauticos</h2>
+<form id="fIns">
+  <input id="iNombre" placeholder="Nombre" required>
+  <input id="iLabel" placeholder="Label octal (ej 203)" pattern="[0-3][0-7]{2}" size="14" required>
+  <input id="iMin" type="number" step="any" placeholder="Minimo" required>
+  <input id="iMax" type="number" step="any" placeholder="Maximo" required>
+  <input id="iUni" placeholder="Unidad" size="8">
+  <button id="bIns">Agregar</button> <button type="button" onclick="limpiarIns()">Cancelar</button>
+</form>
+<table><thead><tr><th>ID</th><th>Nombre</th><th>Label</th><th>Minimo</th><th>Maximo</th><th>Unidad</th><th></th></tr></thead>
+<tbody id="tIns"></tbody></table>
+
+<h2>Envios</h2>
+<form id="fEnv">
+  <select id="eIns" required></select>
+  <input id="eVal" type="number" step="any" placeholder="Valor" required>
+  <button id="bEnv">Enviar</button> <button type="button" onclick="limpiarEnv()">Cancelar</button>
+</form>
+<p style="font-size:13px">Colores del codigo: <span class="bin"><span class="par">paridad</span> <span class="ssm">SSM</span> <span class="dat">datos</span> <span class="sdi">SDI</span> <span class="lab">label</span></span></p>
+<table><thead><tr><th>ID</th><th>Instrumento</th><th>Valor</th><th>Codigo ARINC 429 (bit 32 ... bit 1)</th><th>Hex</th><th>Verificacion</th><th></th></tr></thead>
+<tbody id="tEnv"></tbody></table>
+
+<h2>Salida por auricular (tension)</h2>
+<p style="font-size:13px">Cada bit sale como un pulso bipolar con retorno a cero: 1 = tension positiva, 0 = tension negativa. Se transmite primero el bit 1.</p>
+<canvas id="osc" width="1000" height="120"></canvas>
+
+<script>
+const $ = id => document.getElementById(id);
+const api = async (url, method = 'GET', body) => {
+  const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error);
+  return j;
+};
+const aviso = t => { $('msg').textContent = t || ''; };
+let insEdit = null, envEdit = null, instrumentos = [];
+
+function pintarBin(b) {
+  return `<span class="bin"><span class="par">${b[0]}</span><span class="ssm">${b.slice(1,3)}</span> <span class="dat">${b.slice(3,22)}</span> <span class="sdi">${b.slice(22,24)}</span> <span class="lab">${b.slice(24)}</span></span>`;
+}
+
+async function cargar() {
+  instrumentos = await api('/api/instrumentos');
+  $('tIns').innerHTML = instrumentos.map(i => `<tr><td>${i.ins_id}</td><td>${i.ins_nombre}</td><td>${i.ins_label}</td>
+    <td>${i.ins_minimo}</td><td>${i.ins_maximo}</td><td>${i.ins_unidad || ''}</td>
+    <td><button onclick="editarIns(${i.ins_id})">Editar</button> <button onclick="borrarIns(${i.ins_id})">Borrar</button></td></tr>`).join('');
+  $('eIns').innerHTML = instrumentos.map(i => `<option value="${i.ins_id}">${i.ins_nombre} (${i.ins_minimo} a ${i.ins_maximo})</option>`).join('');
+  const envios = await api('/api/envios');
+  $('tEnv').innerHTML = envios.map(e => {
+    const v = e.verificacion, okLabel = v.label === e.ins_label;
+    const okValor = Math.abs(v.valor - e.env_valor) <= Math.max(Math.abs(e.ins_minimo), Math.abs(e.ins_maximo)) / 262143;
+    const ok = okLabel && okValor && v.paridadOk;
+    return `<tr><td>${e.env_id}</td><td>${e.ins_nombre}</td><td>${e.env_valor} ${e.ins_unidad || ''}</td>
+      <td>${pintarBin(e.env_codigo_bin)}</td><td class="bin">${e.env_codigo_hex}</td>
+      <td class="${ok ? 'ok' : 'mal'}">${ok ? 'OK' : 'ERROR'} (label ${v.label}, valor ${v.valor.toFixed(2)}, paridad ${v.paridadOk ? 'ok' : 'mal'})</td>
+      <td><button onclick="sonar('${e.env_codigo_bin}')">Auricular</button>
+          <button onclick="serie(${e.env_id})">Serie</button>
+          <button onclick='editarEnv(${JSON.stringify({ id: e.env_id, ins: e.ins_id, val: e.env_valor })})'>Editar</button>
+          <button onclick="borrarEnv(${e.env_id})">Borrar</button></td></tr>`;
+  }).join('');
+}
+
+// ----- instrumentos -----
+function editarIns(id) {
+  const i = instrumentos.find(x => x.ins_id === id); insEdit = id;
+  $('iNombre').value = i.ins_nombre; $('iLabel').value = i.ins_label;
+  $('iMin').value = i.ins_minimo; $('iMax').value = i.ins_maximo; $('iUni').value = i.ins_unidad || '';
+  $('bIns').textContent = 'Guardar';
+}
+function limpiarIns() { insEdit = null; $('fIns').reset(); $('bIns').textContent = 'Agregar'; }
+async function borrarIns(id) {
+  if (!confirm('Borrar instrumento ' + id + '?')) return;
+  try { await api('/api/instrumentos/' + id, 'DELETE'); aviso(); } catch (e) { aviso(e.message); }
+  cargar();
+}
+$('fIns').onsubmit = async ev => {
+  ev.preventDefault();
+  const b = { ins_nombre: $('iNombre').value, ins_label: $('iLabel').value, ins_minimo: Number($('iMin').value),
+              ins_maximo: Number($('iMax').value), ins_unidad: $('iUni').value };
+  try { insEdit ? await api('/api/instrumentos/' + insEdit, 'PUT', b) : await api('/api/instrumentos', 'POST', b); limpiarIns(); aviso(); }
+  catch (e) { aviso(e.message); }
+  cargar();
+};
+
+// ----- envios -----
+function editarEnv(e) { envEdit = e.id; $('eIns').value = e.ins; $('eVal').value = e.val; $('bEnv').textContent = 'Guardar'; }
+function limpiarEnv() { envEdit = null; $('fEnv').reset(); $('bEnv').textContent = 'Enviar'; }
+async function borrarEnv(id) {
+  if (!confirm('Borrar envio ' + id + '?')) return;
+  try { await api('/api/envios/' + id, 'DELETE'); aviso(); } catch (e) { aviso(e.message); }
+  cargar();
+}
+async function serie(id) {
+  const r = await api('/api/envios/' + id + '/serie', 'POST');
+  aviso(r.serie ? '' : 'No hay puerto serie configurado (ver README)');
+}
+$('fEnv').onsubmit = async ev => {
+  ev.preventDefault();
+  const b = { ins_id: Number($('eIns').value), env_valor: Number($('eVal').value) };
+  try {
+    const r = envEdit ? await api('/api/envios/' + envEdit, 'PUT', b) : await api('/api/envios', 'POST', b);
+    aviso(r.serie ? '' : 'Codigo generado. (Puerto serie no configurado)');
+    sonar(r.bin); limpiarEnv();
+  } catch (e) { aviso(e.message); }
+  cargar();
+};
+
+// ----- salida por auricular: pulsos bipolares RZ -----
+let ctxAudio = null;
+function sonar(bin) {
+  ctxAudio = ctxAudio || new AudioContext();
+  const sr = ctxAudio.sampleRate, muestrasBit = Math.round(sr / 1000); // 1000 bits por segundo
+  const bits = bin.split('').reverse();                                   // bit 1 primero
+  const repeticiones = 20, gap = 4 * muestrasBit;                         // 4 bits de silencio entre palabras
+  const largoPalabra = bits.length * muestrasBit + gap;
+  const buf = ctxAudio.createBuffer(1, largoPalabra * repeticiones, sr), d = buf.getChannelData(0);
+  for (let r = 0; r < repeticiones; r++)
+    bits.forEach((b, i) => {
+      const ini = r * largoPalabra + i * muestrasBit;
+      for (let s = 0; s < muestrasBit / 2; s++) d[ini + s] = b === '1' ? 0.8 : -0.8;  // mitad con tension, mitad en cero
+    });
+  const src = ctxAudio.createBufferSource(); src.buffer = buf; src.connect(ctxAudio.destination); src.start();
+  dibujar(d.subarray(0, largoPalabra));
+}
+function dibujar(d) {
+  const c = $('osc'), g = c.getContext('2d'); g.clearRect(0, 0, c.width, c.height);
+  g.strokeStyle = '#ccc'; g.beginPath(); g.moveTo(0, 60); g.lineTo(c.width, 60); g.stroke();
+  g.strokeStyle = '#070'; g.beginPath();
+  for (let x = 0; x < c.width; x++) { const y = 60 - d[Math.floor(x * d.length / c.width)] * 60; x ? g.lineTo(x, y) : g.moveTo(x, y); }
+  g.stroke();
+}
+cargar().catch(e => aviso('No se pudo conectar con la base de datos: ' + e.message));
+</script>
+</body>
+</html>
